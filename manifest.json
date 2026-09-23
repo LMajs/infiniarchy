@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.lmajs.infiniarchy",
+  "name": "Infiniarchy",
+  "version": "1.0.0",
+  "author": "LMajs",
+  "license": "MIT",
+  "description": "Infinite canvas window overview for Omarchy: every window as a live, free-floating tile on one pannable, zoomable canvas. Drag, chain and arrange windows, then click one to jump to it. Toggle with Right Alt + Q (configurable).",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "plugin/Canvas.qml"
+  }
+}

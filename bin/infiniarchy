@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""infiniarchy: infinite-canvas window overview for Omarchy / Hyprland.
+
+The overlay itself is an omarchy-shell plugin (io.github.lmajs.infiniarchy). This CLI owns
+the user config (~/.config/infiniarchy/config.json), generates the Hyprland
+bind file (~/.config/hypr/infiniarchy.lua) and reloads Hyprland.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+PLUGIN_ID = "io.github.lmajs.infiniarchy"
+HOME = Path.home()
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "infiniarchy"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+HYPR_FILE = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "hypr" / "infiniarchy.lua"
+RECORD_SUBMAP = "infiniarchy-record"
+RECORD_TIMEOUT_MS = 20000
+BIND_DESCRIPTION = "Infiniarchy: infinite canvas window overview"
+
+DEFAULTS = {
+    "hotkey": "RALT + Q",
+    "lens": 0.55,
+    "liveThumbnails": True,
+    "showMinimap": True,
+    "showLabels": False,
+    "canvasDesktop": False,
+    "showDots": True,
+    "attachWindows": True,
+    "flatView": True,
+    "showHints": True,
+}
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "infiniarchy"
+LAYOUT_FILE = STATE_DIR / "layout.json"
+
+MOD_ORDER = ["SUPER", "CTRL", "SHIFT", "ALT", "RALT"]
+MOD_ALIASES = {
+    "SUPER": "SUPER", "WIN": "SUPER", "META": "SUPER", "MOD4": "SUPER", "LOGO": "SUPER", "CMD": "SUPER",
+    "CTRL": "CTRL", "CONTROL": "CTRL", "CTL": "CTRL",
+    "SHIFT": "SHIFT",
+    "ALT": "ALT", "LALT": "ALT", "ALT_L": "ALT", "MOD1": "ALT",
+    "RALT": "RALT", "ALT_R": "RALT", "RIGHTALT": "RALT", "RIGHT_ALT": "RALT", "ALTGR": "RALT",
+}
+# Keys that make no sense as the trigger (or would lock the user out).
+FORBIDDEN_KEYS = {"ESCAPE"}
+
+
+class CanvasError(Exception):
+    pass
+
+
+# ── config ────────────────────────────────────────────────────────────────
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        data = json.loads(CONFIG_FILE.read_text())
+        if isinstance(data, dict):
+            cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        print(f"warning: ignoring unreadable {CONFIG_FILE}: {exc}", file=sys.stderr)
+    return cfg
+
+
+def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(CONFIG_FILE)
+
+
+def coerce(key, raw):
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        low = str(raw).strip().lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off"):
+            return False
+        raise CanvasError(f"{key} expects true/false, got {raw!r}")
+    if isinstance(default, float):
+        try:
+            value = float(raw)
+        except ValueError:
+            raise CanvasError(f"{key} expects a number, got {raw!r}")
+        return max(0.0, min(1.0, value))
+    return str(raw)
+
+
+# ── hyprland helpers ──────────────────────────────────────────────────────
+
+
+def run(cmd, check=False):
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise CanvasError(f"{' '.join(cmd)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc
+
+
+def hypr_lua(code):
+    """Evaluate Lua inside Hyprland and return its printed result."""
+    return run(["hyprctl", "repl", code]).stdout.strip()
+
+
+def keysym_valid(name):
+    # Unknown keysyms make is_key_down return nothing instead of a boolean.
+    out = hypr_lua(f'local ok, v = pcall(hl.is_key_down, "{name}") return (ok and type(v) == "boolean") and "yes" or "no"')
+    return out == "yes"
+
+
+def resolve_key(raw):
+    """Return the Hyprland spelling for a key, or raise."""
+    key = raw.strip()
+    if not key:
+        raise CanvasError("hotkey needs a key, e.g. RALT + Q")
+    if key.upper() in FORBIDDEN_KEYS:
+        raise CanvasError(f"{key} can't be the canvas key (it closes the canvas)")
+    if key.upper() in MOD_ALIASES:
+        raise CanvasError(f"{key} is a modifier; add a regular key, e.g. {key.upper()} + Q")
+    if len(key) == 1:
+        return key.upper()
+    if shutil.which("hyprctl") is None:
+        return key.upper()
+    candidates = [key, key.lower(), key.capitalize(), key.title().replace(" ", "_"),
+                  "_".join(p.capitalize() for p in key.split("_"))]
+    for cand in candidates:
+        if keysym_valid(cand):
+            return key.upper()
+    raise CanvasError(f"unknown key {raw!r} (use an xkb keysym name such as Q, F5, SPACE, RETURN, GRAVE)")
+
+
+def normalize_hotkey(text):
+    parts = [p.strip() for p in str(text).replace(",", "+").split("+") if p.strip()]
+    if not parts:
+        raise CanvasError("empty hotkey")
+    mods, keys = [], []
+    for part in parts:
+        alias = MOD_ALIASES.get(part.upper())
+        if alias:
+            if alias not in mods:
+                mods.append(alias)
+        else:
+            keys.append(part)
+    if len(keys) != 1:
+        raise CanvasError(f"hotkey must have exactly one non-modifier key, got {text!r}")
+    if "RALT" in mods and "ALT" in mods:
+        mods.remove("ALT")
+    key = resolve_key(keys[0])
+    mods.sort(key=MOD_ORDER.index)
+    return " + ".join(mods + [key])
+
+
+def split_hotkey(hotkey):
+    parts = [p.strip() for p in hotkey.split("+")]
+    return parts[:-1], parts[-1]
+
+
+def hypr_combos(hotkey):
+    """Hyprland key strings the hotkey registers as (plain-Alt form first)."""
+    mods, key = split_hotkey(hotkey)
+    if "RALT" in mods:
+        base = [m for m in mods if m != "RALT"]
+        return [" + ".join(base + ["ALT", key]), " + ".join(base + ["MOD5", key])]
+    return [" + ".join(mods + [key])]
+
+
+MODMASK = {"SHIFT": 1, "CAPS": 2, "CTRL": 4, "ALT": 8, "MOD2": 16, "MOD3": 32, "SUPER": 64, "MOD5": 128}
+
+
+def combo_signature(combo):
+    parts = [p.strip().upper() for p in combo.split("+")]
+    mask = 0
+    for m in parts[:-1]:
+        mask |= MODMASK.get(m, 0)
+    return mask, parts[-1].upper()
+
+
+def find_conflicts(hotkey):
+    """Existing binds (not ours) that use the same modifier mask and key."""
+    proc = run(["hyprctl", "binds", "-j"])
+    try:
+        binds = json.loads(proc.stdout or "[]")
+    except ValueError:
+        return []
+    wanted = {combo_signature(c) for c in hypr_combos(hotkey)}
+    hits = []
+    for b in binds:
+        if str(b.get("description", "")).startswith(BIND_DESCRIPTION) or b.get("submap"):
+            continue
+        sig = (int(b.get("modmask", 0)), str(b.get("key", "")).upper())
+        if sig in wanted:
+            hits.append(b.get("description") or f"{b.get('dispatcher', '')} {b.get('arg', '')}".strip())
+    return hits
+
+
+# ── bind file generation ──────────────────────────────────────────────────
+
+
+def lua_str(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def render_bind_file(cfg, replace=False):
+    hotkey = cfg["hotkey"]
+    combos = hypr_combos(hotkey)
+    mods, _ = split_hotkey(hotkey)
+    lines = [
+        "-- Generated by infiniarchy. Don't edit by hand; change the hotkey with",
+        "--   infiniarchy hotkey set \"SUPER + O\"",
+        "-- or from the canvas settings (gear icon). Loaded from ~/.config/hypr/hyprland.lua.",
+        f"-- Hotkey: {hotkey}",
+        "",
+        f'local canvas_toggle = "omarchy-shell shell toggle {PLUGIN_ID} \'{{}}\'"',
+        "",
+    ]
+    if replace:
+        for combo in combos:
+            lines.append(f"pcall(hl.unbind, {lua_str(combo)})")
+        lines.append("")
+    if "RALT" in mods:
+        plain, level3 = combos
+        lines += [
+            "-- On layouts where Right Alt is a plain Alt (e.g. us), Hyprland can't tell",
+            "-- Left and Right Alt apart by modifier, so the bind checks which Alt is held",
+            "-- and hands Left Alt presses straight back to the focused app.",
+            f"hl.bind({lua_str(plain)}, function()",
+            '  if hl.is_key_down("Alt_R") then',
+            "    hl.exec_cmd(canvas_toggle)",
+            "    return",
+            "  end",
+            "  return { pass_event = true }",
+            f"end, {{ description = {lua_str(BIND_DESCRIPTION + ' (' + hotkey + ')')} }})",
+            "",
+            "-- Layouts where Right Alt is AltGr / ISO_Level3_Shift report it as MOD5.",
+            f"hl.bind({lua_str(level3)}, hl.dsp.exec_cmd(canvas_toggle),",
+            f"  {{ description = {lua_str(BIND_DESCRIPTION + ' (' + hotkey + ', AltGr)')} }})",
+        ]
+    else:
+        lines += [
+            f"hl.bind({lua_str(combos[0])}, hl.dsp.exec_cmd(canvas_toggle),",
+            f"  {{ description = {lua_str(BIND_DESCRIPTION + ' (' + hotkey + ')')} }})",
+        ]
+    lines += [
+        "",
+        "-- While the canvas settings record a new hotkey, Hyprland sits in this empty",
+        "-- submap so every key reaches the recorder. It resets itself after a timeout;",
+        "-- SUPER + CTRL + SHIFT + ALT + ESCAPE is a manual way out.",
+        f"hl.define_submap({lua_str(RECORD_SUBMAP)}, function()",
+        '  hl.bind("SUPER + CTRL + SHIFT + ALT + ESCAPE", hl.dsp.submap("reset"))',
+        "end)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def config_errors():
+    out = run(["hyprctl", "configerrors"]).stdout.strip()
+    if not out or out.lower() in ("no errors", ""):
+        return []
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def our_binds():
+    try:
+        binds = json.loads(run(["hyprctl", "binds", "-j"]).stdout or "[]")
+    except ValueError:
+        return []
+    return [b for b in binds if str(b.get("description", "")).startswith(BIND_DESCRIPTION)]
+
+
+def apply(cfg, replace=False, reload=True):
+    """Write the bind file, reload Hyprland and verify; roll back on failure."""
+    HYPR_FILE.parent.mkdir(parents=True, exist_ok=True)
+    previous = HYPR_FILE.read_text() if HYPR_FILE.exists() else None
+    HYPR_FILE.write_text(render_bind_file(cfg, replace))
+    if not reload or shutil.which("hyprctl") is None:
+        return
+    before = set(config_errors())
+    run(["hyprctl", "reload", "config-only"])
+    time.sleep(0.3)
+    fresh = [e for e in config_errors() if e not in before or "infiniarchy" in e]
+    if fresh:
+        if previous is not None:
+            HYPR_FILE.write_text(previous)
+            run(["hyprctl", "reload", "config-only"])
+        raise CanvasError("Hyprland rejected the bind, reverted:\n  " + "\n  ".join(fresh))
+
+
+# ── shell / overlay ───────────────────────────────────────────────────────
+
+
+def shell_call(*args):
+    exe = shutil.which("omarchy-shell")
+    if not exe:
+        raise CanvasError("omarchy-shell not found on PATH")
+    return run([exe, "shell", *args])
+
+
+def record(start):
+    if start:
+        code = (
+            f'hl.dispatch(hl.dsp.submap("{RECORD_SUBMAP}")) '
+            f'hl.timer(function() if hl.get_current_submap() == "{RECORD_SUBMAP}" then '
+            f'hl.dispatch(hl.dsp.submap("reset")) end end, {{ timeout = {RECORD_TIMEOUT_MS}, type = "oneshot" }})'
+        )
+    else:
+        code = f'if hl.get_current_submap() == "{RECORD_SUBMAP}" then hl.dispatch(hl.dsp.submap("reset")) end'
+    out = run(["hyprctl", "eval", code]).stdout.strip()
+    if out.startswith("error"):
+        raise CanvasError(out)
+
+
+# ── commands ──────────────────────────────────────────────────────────────
+
+
+def emit(args, payload, text):
+    if args.json:
+        print(json.dumps(payload))
+    elif text:
+        print(text)
+
+
+def cmd_hotkey(args):
+    cfg = load_config()
+    action = args.action or "show"
+    if action == "show":
+        emit(args, {"ok": True, "hotkey": cfg["hotkey"], "combos": hypr_combos(cfg["hotkey"])}, cfg["hotkey"])
+        return 0
+    if action == "check":
+        hotkey = normalize_hotkey(" ".join(args.combo))
+        conflicts = find_conflicts(hotkey)
+        emit(args, {"ok": True, "hotkey": hotkey, "conflicts": conflicts},
+             hotkey + ("" if not conflicts else "\nconflicts with: " + ", ".join(conflicts)))
+        return 0
+    if action == "reset":
+        hotkey = DEFAULTS["hotkey"]
+    else:
+        if not args.combo:
+            raise CanvasError('usage: infiniarchy hotkey set "SUPER + O"')
+        hotkey = normalize_hotkey(" ".join(args.combo))
+    conflicts = find_conflicts(hotkey)
+    if conflicts and not args.replace:
+        emit(args, {"ok": False, "hotkey": hotkey, "conflicts": conflicts,
+                    "error": "already bound to: " + ", ".join(conflicts)},
+             None)
+        if not args.json:
+            print(f"{hotkey} is already bound to: {', '.join(conflicts)}\n"
+                  f"Re-run with --replace to take it over (the old bind is unbound).", file=sys.stderr)
+        return 2
+    old = cfg["hotkey"]
+    cfg["hotkey"] = hotkey
+    try:
+        apply(cfg, replace=bool(conflicts))
+    except CanvasError:
+        cfg["hotkey"] = old
+        raise
+    save_config(cfg)
+    emit(args, {"ok": True, "hotkey": hotkey, "previous": old, "replaced": conflicts},
+         f"Infiniarchy hotkey: {old} → {hotkey}" + (f" (took over: {', '.join(conflicts)})" if conflicts else ""))
+    return 0
+
+
+def cmd_config(args):
+    cfg = load_config()
+    if args.action in (None, "show"):
+        emit(args, {"ok": True, **cfg}, json.dumps(cfg, indent=2))
+        return 0
+    if args.action == "get":
+        if args.key not in DEFAULTS:
+            raise CanvasError(f"unknown key {args.key!r}; keys: {', '.join(DEFAULTS)}")
+        emit(args, {"ok": True, args.key: cfg[args.key]}, str(cfg[args.key]))
+        return 0
+    if args.action == "set":
+        if args.key == "hotkey":
+            raise CanvasError('use: infiniarchy hotkey set "..."')
+        if args.key not in DEFAULTS:
+            raise CanvasError(f"unknown key {args.key!r}; keys: {', '.join(DEFAULTS)}")
+        if args.value is None:
+            raise CanvasError("missing value")
+        cfg[args.key] = coerce(args.key, args.value)
+        save_config(cfg)
+        emit(args, {"ok": True, args.key: cfg[args.key]}, f"{args.key} = {cfg[args.key]}")
+        return 0
+    raise CanvasError(f"unknown config action {args.action!r}")
+
+
+def cmd_apply(args):
+    cfg = load_config()
+    if not CONFIG_FILE.exists():
+        save_config(cfg)
+    apply(cfg, replace=args.replace, reload=not args.no_reload)
+    emit(args, {"ok": True, "hotkey": cfg["hotkey"], "file": str(HYPR_FILE)},
+         f"Wrote {HYPR_FILE} (hotkey {cfg['hotkey']})")
+    return 0
+
+
+def cmd_status(args):
+    cfg = load_config()
+    binds = our_binds() if shutil.which("hyprctl") else []
+    plugin_dir = HOME / ".config/omarchy/plugins" / PLUGIN_ID
+    status = {
+        "ok": True,
+        "hotkey": cfg["hotkey"],
+        "combos": hypr_combos(cfg["hotkey"]),
+        "bindFile": str(HYPR_FILE),
+        "bindFileExists": HYPR_FILE.exists(),
+        "bindsLoaded": [b.get("description") for b in binds],
+        "pluginInstalled": plugin_dir.exists(),
+        "config": str(CONFIG_FILE),
+    }
+    if args.json:
+        print(json.dumps(status))
+    else:
+        for k, v in status.items():
+            if k != "ok":
+                print(f"{k:15} {v}")
+    return 0
+
+
+def cmd_overlay(args):
+    payload = json.dumps({"view": "settings"} if args.command == "settings" else {})
+    if args.command == "toggle":
+        shell_call("toggle", PLUGIN_ID, payload)
+    elif args.command in ("open", "settings"):
+        out = shell_call("summon", PLUGIN_ID, payload).stdout.strip()
+        if out and out != "ok":
+            raise CanvasError(f"omarchy-shell could not open the canvas ({out}); is the plugin enabled?")
+    elif args.command == "close":
+        shell_call("hide", PLUGIN_ID)
+    return 0
+
+
+def cmd_release(args):
+    """Send canvas-managed windows back to their original workspace and tiling; forget viewports."""
+    try:
+        layout = json.loads(LAYOUT_FILE.read_text())
+    except (OSError, ValueError):
+        layout = {}
+    managed = layout.get("managed") or {}
+    clients = json.loads(run(["hyprctl", "-j", "clients"]).stdout or "[]")
+    lua = []
+    released = []
+    for c in clients:
+        addr = c.get("address", "")
+        if addr not in managed:
+            continue
+        origin = managed[addr] if isinstance(managed[addr], dict) else {}
+        home = origin.get("ws")
+        win = f"window = 'address:{addr}'"
+        if home is not None and home != c.get("workspace", {}).get("id"):
+            lua.append(f"hl.dispatch(hl.dsp.window.move({{ workspace = '{home}', follow = false, {win} }}))")
+        if c.get("floating") and not origin.get("floating", False):
+            lua.append(f"hl.dispatch(hl.dsp.window.float({{ action = 'disable', {win} }}))")
+        released.append(addr)
+    if lua:
+        out = run(["hyprctl", "eval", "\n".join(lua)]).stdout.strip()
+        if out.startswith("error"):
+            raise CanvasError(out)
+    if layout:
+        layout["managed"] = {}
+        layout["viewports"] = {}
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = LAYOUT_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(layout, indent=1))
+        tmp.replace(LAYOUT_FILE)
+    emit(args, {"ok": True, "released": len(released)},
+         f"Released {len(released)} window(s) back to their workspaces and tiling; canvas positions are kept.")
+    return 0
+
+
+def cmd_record(args):
+    record(args.action == "start")
+    emit(args, {"ok": True}, None)
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="infiniarchy", description=__doc__.splitlines()[0])
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    for name, helptext in (("toggle", "show/hide the canvas"), ("open", "show the canvas"),
+                           ("close", "hide the canvas"), ("settings", "open the canvas settings")):
+        sub.add_parser(name, help=helptext)
+
+    hk = sub.add_parser("hotkey", help="show or change the toggle hotkey")
+    hk.add_argument("action", nargs="?", choices=["show", "set", "reset", "check"])
+    hk.add_argument("combo", nargs="*", help='e.g. "RALT + Q", "SUPER + CTRL + O"')
+    hk.add_argument("--replace", action="store_true", help="take over a key already bound elsewhere")
+
+    cf = sub.add_parser("config", help="show/get/set options (lens, liveThumbnails, showMinimap, showLabels, showDots, attachWindows, flatView, showHints, canvasDesktop)")
+    cf.add_argument("action", nargs="?", choices=["show", "get", "set"])
+    cf.add_argument("key", nargs="?")
+    cf.add_argument("value", nargs="?")
+
+    ap = sub.add_parser("apply", help="regenerate the Hyprland bind file from config and reload")
+    ap.add_argument("--no-reload", action="store_true")
+    ap.add_argument("--replace", action="store_true")
+
+    rc = sub.add_parser("record", help=argparse.SUPPRESS)
+    rc.add_argument("action", choices=["start", "stop"])
+
+    sub.add_parser("status", help="show install / bind status")
+    sub.add_parser("release", help="send canvas-managed windows back to their workspaces and tiling")
+
+    args = parser.parse_args(argv)
+    handlers = {
+        "hotkey": cmd_hotkey, "config": cmd_config, "apply": cmd_apply, "status": cmd_status,
+        "record": cmd_record, "toggle": cmd_overlay, "open": cmd_overlay, "close": cmd_overlay,
+        "settings": cmd_overlay, "release": cmd_release,
+    }
+    try:
+        return handlers[args.command](args)
+    except CanvasError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"infiniarchy: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
