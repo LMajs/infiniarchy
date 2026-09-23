@@ -972,7 +972,7 @@ Item {
       opened: opened, closing: closing, view: view, windows: items.length,
       zoom: Math.round(zoom * 1000) / 1000, lens: Math.round(lensStrength * 100) / 100,
       selected: selectedAddr, hovered: hoveredAddr, dragging: dragAddr, hotkey: cfg.hotkey, links: links,
-      picked: pickedList(), toast: toastText, cli: cli, wallpaper: wallpaper,
+      picked: pickedList(), toast: toastText, cli: cli, wallpaper: wallpaper, panX: Math.round(panX), panY: Math.round(panY),
       activeWs: activeWs, viewports: layout.viewports, canvasDesktop: canvasDesktop, flat: flat,
       settingsPhase: settings.phase, captured: settings.captured, message: settings.message,
       items: list
