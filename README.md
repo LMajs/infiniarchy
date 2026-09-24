@@ -44,8 +44,9 @@ otherwise).
   middle-click to close.
 - **Browser tabs.** The + on a Brave, Chrome, or Chromium tile lays that
   window's tabs out beside it. Nothing is split into real windows; clicking a
-  tab switches to it in the same window. The browser has to be started with
-  `--remote-debugging-port=9222`.
+  tab switches to it in the same window. Quit the browser first, then relaunch
+  it with `--remote-debugging-port=9222`. On Omarchy the command is
+  `brave-origin`, or add that line to `~/.config/brave-origin-flags.conf`.
 - **Minimap** of the whole canvas; click or drag it to jump around.
 - **Configurable hotkey** with a built-in shortcut recorder, and a true
   *Right* Alt binding that leaves Left Alt + Q working in your apps.

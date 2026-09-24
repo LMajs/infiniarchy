@@ -164,7 +164,7 @@ def list_tabs(address):
     port = browser_port()
     if not port:
         return {"ok": False, "error": "no-port",
-                "message": "Brave or Chromium is not listening on the debugging port. Relaunch it with --remote-debugging-port=9222"}
+                "message": "Quit Brave, then start it again with the debugging port. On Omarchy the command is brave-origin, or add --remote-debugging-port=9222 to ~/.config/brave-origin-flags.conf"}
     clients = [c for c in hypr_clients() if c.get("address") == address and is_browser(c.get("class"))]
     if not clients:
         return {"ok": False, "error": "not-a-browser", "message": "That window is not a supported browser."}

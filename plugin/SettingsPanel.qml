@@ -527,7 +527,7 @@ BorderSurface {
           { key: "Right-click window", text: "Unlink it from everything. On a selected window: keep the selection linked together, cut it loose from the rest" },
           { key: "Right-click background", text: "Clear the selection" },
           { key: "Middle-click window", text: "Close the window" },
-          { key: "+ on a browser window", text: "Unfold its tabs onto the canvas. They are only a view: clicking one switches to that tab in the same window. Needs the browser launched with --remote-debugging-port=9222" },
+          { key: "+ on a browser window", text: "Unfold its tabs onto the canvas. They are only a view: clicking one switches to that tab in the same window. Quit the browser first, then relaunch it with --remote-debugging-port=9222 (on Omarchy: brave-origin, or add that line to ~/.config/brave-origin-flags.conf)" },
           { key: "Double-click background", text: "Fit everything (also the grid button, 0 or F)" },
           { key: "Minimap", text: "Click or drag to jump around" },
           { head: "Keyboard" },
