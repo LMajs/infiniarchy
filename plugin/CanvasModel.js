@@ -360,7 +360,7 @@ function landingPlan(items, ws, vp, mon) {
   var cmds = [], moved = []
   for (var i = 0; i < items.length; i++) {
     var it = items[i]
-    if (it.special || it.fullscreen || it.pinned) continue
+    if (it.tab || it.special || it.fullscreen || it.pinned) continue
     var inView = intersects(it, view, 0)
     if (!inView && it.workspaceId !== ws) continue
     var w = "address:" + it.address

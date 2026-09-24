@@ -483,6 +483,18 @@ def cmd_record(args):
     return 0
 
 
+def cmd_tabs(args):
+    script = str(Path(__file__).resolve().parent / "browser_tabs.py")
+    argv = [sys.executable, script, args.action] + ([args.target] if args.target else [])
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    text = (proc.stdout or "").strip() or json.dumps({"ok": False, "error": (proc.stderr or "failed").strip()})
+    if args.json:
+        print(text)
+    else:
+        print(text)
+    return 0 if proc.returncode == 0 else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="infiniarchy", description=__doc__.splitlines()[0])
     parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -512,11 +524,15 @@ def main(argv=None):
     sub.add_parser("status", help="show install / bind status")
     sub.add_parser("release", help="send canvas-managed windows back to their workspaces and tiling")
 
+    tb = sub.add_parser("tabs", help="list or activate browser tabs (canvas view only)")
+    tb.add_argument("action", choices=["list", "activate", "clear"])
+    tb.add_argument("target", nargs="?")
+
     args = parser.parse_args(argv)
     handlers = {
         "hotkey": cmd_hotkey, "config": cmd_config, "apply": cmd_apply, "status": cmd_status,
         "record": cmd_record, "toggle": cmd_overlay, "open": cmd_overlay, "close": cmd_overlay,
-        "settings": cmd_overlay, "release": cmd_release,
+        "settings": cmd_overlay, "release": cmd_release, "tabs": cmd_tabs,
     }
     try:
         return handlers[args.command](args)

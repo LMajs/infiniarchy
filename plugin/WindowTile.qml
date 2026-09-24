@@ -16,6 +16,8 @@ Item {
   property bool selected: false
   property bool picked: false
   property bool focusedWindow: false
+  property bool browser: false
+  property bool unfolded: false
   property bool showLabel: false
   property real zoom: 1
   property real reveal: 1
@@ -62,10 +64,20 @@ Item {
     ScreencopyView {
       id: view
       anchors.fill: parent
-      captureSource: tile.capturing && tile.toplevel ? tile.toplevel.wayland : null
-      live: tile.capturing && tile.live
+      visible: !tile.win.tab
+      captureSource: !tile.win.tab && tile.capturing && tile.toplevel ? tile.toplevel.wayland : null
+      live: tile.capturing && tile.live && !tile.win.tab
       paintCursor: false
       onCaptureSourceChanged: Qt.callLater(tile.grab)
+    }
+
+    Image {
+      anchors.fill: parent
+      visible: !!tile.win.tab && source != ""
+      source: tile.win.image ? "file://" + tile.win.image : ""
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      cache: false
     }
 
     Column {
@@ -125,6 +137,27 @@ Item {
     Behavior on border.color { ColorAnimation { duration: 110 } }
   }
 
+  // Unfolds this browser window's tabs into canvas-only cards.
+  Rectangle {
+    visible: tile.browser && !tile.win.tab && (tile.hovered || tile.unfolded)
+    z: 2
+    width: 30
+    height: 30
+    x: parent.width - width - 10
+    y: 10
+    radius: 15
+    color: tile.unfolded ? tile.accent : Util.alpha(tile.background, 0.88)
+    border.width: 1
+    border.color: Util.alpha(tile.foreground, 0.45)
+    Text {
+      anchors.centerIn: parent
+      text: tile.unfolded ? "–" : "+"
+      color: tile.unfolded ? "white" : tile.foreground
+      font.family: tile.fontFamily
+      font.pixelSize: 16
+    }
+  }
+
   // Title pill above the tile (hover / selection / "always show titles").
   Rectangle {
     id: pill
@@ -165,7 +198,7 @@ Item {
       }
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        text: tile.win.special ? "scratchpad" : "ws " + (tile.win.workspaceName || "")
+        text: tile.win.tab ? "tab" : (tile.win.special ? "scratchpad" : "ws " + (tile.win.workspaceName || ""))
         color: Util.alpha(tile.foreground, 0.5)
         font.family: tile.fontFamily
         font.pixelSize: Style.font.caption

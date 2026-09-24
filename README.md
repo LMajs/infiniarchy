@@ -42,6 +42,10 @@ otherwise).
   `WASD` to pan, `Q` / `E` to hop between windows, arrows / `hjkl` to select.
 - **Box select, unlink, close.** Right-drag to select, right-click to unlink,
   middle-click to close.
+- **Browser tabs.** The + on a Brave, Chrome, or Chromium tile lays that
+  window's tabs out beside it. Nothing is split into real windows; clicking a
+  tab switches to it in the same window. The browser has to be started with
+  `--remote-debugging-port=9222`.
 - **Minimap** of the whole canvas; click or drag it to jump around.
 - **Configurable hotkey** with a built-in shortcut recorder, and a true
   *Right* Alt binding that leaves Left Alt + Q working in your apps.

@@ -92,9 +92,22 @@ Item {
   readonly property color accent: Color.accent
   readonly property string fontFamily: Style.font.menuFamily
 
+  // Canvas-only copies of a browser window's tabs. Not Hyprland windows.
+  property var tabCards: ([])
+
+  function isBrowser(cls) {
+    var n = String(cls || "").toLowerCase()
+    return n.indexOf("brave") >= 0 || n.indexOf("chrome") >= 0 || n.indexOf("chromium") >= 0
+  }
+
   function itemRect(addr) {
     var it = byAddr[addr]
     if (!it) return null
+    if (it.tab) {
+      var parent = itemRect(it.parent)
+      if (!parent) return { x: it.x, y: it.y, w: it.w, h: it.h }
+      return { x: parent.x + it.ox, y: parent.y + it.oy, w: it.w, h: it.h }
+    }
     if (dragAddr && dragGroup[addr]) {
       var g = dragGroup[addr]
       return { x: g.x + dragX - dragStart.x, y: g.y + dragY - dragStart.y, w: it.w, h: it.h }
@@ -314,7 +327,10 @@ Item {
     if (!opened && !closing) return
 
     rebuildToplevels()
-    setItems(list)
+    var alive = ({})
+    for (var a = 0; a < list.length; a++) alive[list[a].address] = true
+    tabCards = tabCards.filter(function(card) { return alive[card.parent] })
+    setItems(list.concat(tabCards))
     hasSnapshot = true
     if (!byAddr[selectedAddr]) selectedAddr = model.focused || (list.length ? list[0].address : "")
 
@@ -585,6 +601,7 @@ Item {
       for (var k in o) copy[k] = o[k]
       copy.x = Math.round(mv.x)
       copy.y = Math.round(mv.y)
+      if (copy.tab) return copy
       var e = lay.windows[o.address] || {}
       e.x = copy.x; e.y = copy.y; e.w = Math.round(copy.w); e.h = Math.round(copy.h)
       e.cls = copy.appClass; e.title = copy.title; e.seen = Date.now()
@@ -709,7 +726,7 @@ Item {
 
   function closeWindow(addr) {
     var it = byAddr[addr]
-    if (!it) return
+    if (!it || it.tab) return
     hyprEval("hl.dispatch(hl.dsp.window.close({ window = 'address:" + addr + "' }))")
     if (picked[addr]) {
       var next = ({})
@@ -789,9 +806,77 @@ Item {
     return { x: Math.round(it.x + it.w / 2 - m.w / 2), y: Math.round(it.y + it.h / 2 - m.h / 2) }
   }
 
+  function foldTabs(parent) {
+    tabCards = tabCards.filter(function(card) { return card.parent !== parent })
+    var list = []
+    for (var i = 0; i < items.length; i++) if (!items[i].tab || items[i].parent !== parent) list.push(items[i])
+    setItems(list)
+  }
+
+  function unfoldTabs(addr) {
+    var it = byAddr[addr]
+    if (!it || it.tab || !isBrowser(it.appClass)) return
+    if (tabCards.some(function(card) { return card.parent === addr })) { foldTabs(addr); return }
+    toast("Reading tabs…")
+    runCli(["tabs", "list", addr], function(res) {
+      if (!res || !res.ok) { toast((res && res.message) || "Could not read tabs"); return }
+      var cards = []
+      var cols = Math.max(1, Math.ceil(Math.sqrt(res.tabs.length)))
+      var gap = 28
+      for (var i = 0; i < res.tabs.length; i++) {
+        var tab = res.tabs[i]
+        var col = i % cols, row = Math.floor(i / cols)
+        cards.push({
+          address: "tab:" + addr + ":" + tab.id, tab: true, parent: addr, targetId: tab.id,
+          title: tab.title, url: tab.url, image: tab.image, favicon: tab.favicon,
+          appClass: it.appClass, workspaceName: "", z: 40,
+          ox: it.w + gap + col * (it.w + gap), oy: row * (it.h + gap),
+          x: it.x, y: it.y, w: it.w, h: it.h
+        })
+      }
+      tabCards = tabCards.filter(function(card) { return card.parent !== addr }).concat(cards)
+      var list = []
+      for (var n = 0; n < items.length; n++) if (!items[n].tab) list.push(items[n])
+      setItems(list.concat(tabCards))
+      toast(cards.length ? cards.length + (cards.length === 1 ? " tab" : " tabs") : "No tabs")
+    })
+  }
+
+  function activateTab(it) {
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.focus({ window = 'address:" + it.parent + "' })"])
+    runCli(["tabs", "activate", it.targetId], function(res) {
+      if (!res || !res.ok) toast((res && res.message) || "Could not switch to that tab")
+    })
+    var parent = byAddr[it.parent]
+    closeFocus = it.parent
+    closeTarget = parent && !parent.special ? morphPose(parent) : null
+    dismiss()
+  }
+
+  function unfoldButton(addr) {
+    var r = itemRect(addr)
+    if (!r) return null
+    var s = 30 / zoom, m = 10 / zoom
+    return { x: r.x + r.w - s - m, y: r.y + m, w: s, h: s }
+  }
+
+  function buttonAt(mx, my) {
+    var p = worldAt(mx, my)
+    if (!p) return ""
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (it.tab || !isBrowser(it.appClass)) continue
+      if (it.address !== hoveredAddr && !tabCards.some(function(card) { return card.parent === it.address })) continue
+      var b = unfoldButton(it.address)
+      if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) return it.address
+    }
+    return ""
+  }
+
   function focusItem(addr) {
     var it = byAddr[addr]
     if (!it) return
+    if (it.tab) { activateTab(it); return }
     selectedAddr = addr
     closeFocus = addr
     if (!canvasDesktop || it.special || it.fullscreen) {
@@ -1073,6 +1158,8 @@ Item {
           selected: modelData === root.selectedAddr && root.reveal > 0.5
           picked: !!root.picked[modelData]
           focusedWindow: !!(root.byAddr[modelData] && root.byAddr[modelData].focused)
+          browser: root.isBrowser(win.appClass)
+          unfolded: root.tabCards.some(function(card) { return card.parent === modelData })
           showLabel: root.cfg.showLabels === true
           accent: root.accent
           foreground: root.fg
@@ -1192,8 +1279,8 @@ Item {
         lastY = downY = mouse.y
         button = mouse.button
         mode = ""
-        pressAddr = root.itemAt(mouse.x, mouse.y)
-        if (pressAddr && button === Qt.LeftButton) {
+        pressAddr = root.buttonAt(mouse.x, mouse.y) ? "" : root.itemAt(mouse.x, mouse.y)
+        if (pressAddr && button === Qt.LeftButton && !(root.byAddr[pressAddr] && root.byAddr[pressAddr].tab)) {
           var p = root.worldAt(mouse.x, mouse.y)
           var r = root.itemRect(pressAddr)
           grabDX = p.x - r.x
@@ -1209,7 +1296,7 @@ Item {
           if (button === Qt.RightButton) {
             mode = "select"
             selectFrom = worldLoose(downX, downY)
-          } else if (button === Qt.LeftButton && pressAddr) {
+          } else if (button === Qt.LeftButton && pressAddr && !(root.byAddr[pressAddr] && root.byAddr[pressAddr].tab)) {
             mode = "drag"
             root.startDrag(pressAddr)
           } else {
@@ -1243,6 +1330,8 @@ Item {
         if (m === "pan") return
         var hit = root.itemAt(mouse.x, mouse.y)
         if (mouse.button === Qt.LeftButton) {
+          var btn = root.buttonAt(mouse.x, mouse.y)
+          if (btn) { root.unfoldTabs(btn); return }
           if (hit) { root.focusItem(hit); return }
           root.picked = ({})
           var w = root.worldAt(mouse.x, mouse.y)
